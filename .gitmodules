@@ -1,0 +1,3 @@
+[submodule "config/GQY"]
+	path = config/GQY
+	url = https://github.com/GQYTeam/GQY.git
