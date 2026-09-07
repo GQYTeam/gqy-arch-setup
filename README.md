@@ -17,7 +17,7 @@
 运行在线安装入口时，会先读取根目录的 `version.json` 并显示当前版本：
 
 ```bash
-bash install.sh
+正在持续维护中
 ```
 
 ## 版本
