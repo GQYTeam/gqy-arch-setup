@@ -17,12 +17,16 @@ if [[ -z "$version" ]]; then
 	exit 1
 fi
 
-if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
-	printf '错误：版本号不是有效的 SemVer：%s\n' "$version" >&2
+if [[ ! "$version" =~ ^v[0-9]{2}\.(0[1-9]|1[0-2])\.(0[1-9]|[12][0-9]|3[01])$ ]]; then
+	printf '错误：版本号不是有效的日期版本（vYY.MM.DD）：%s\n' "$version" >&2
 	exit 1
 fi
 
 printf 'GQY Arch Setup %s\n' "$version"
+
+if [[ "${1:-}" == "--version" ]]; then
+	exit 0
+fi
 
 
 

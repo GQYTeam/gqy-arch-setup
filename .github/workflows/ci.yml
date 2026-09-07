@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate scripts and metadata
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate Bash scripts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash -n install.sh
+          bash -n srcipts/CreateYay.sh
+
+      - name: Validate version metadata
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -m json.tool version.json >/dev/null
+          version="$(python3 -c 'import json; print(json.load(open("version.json"))["version"])')"
+          [[ "$version" =~ ^v[0-9]{2}\.(0[1-9]|1[0-2])\.(0[1-9]|[12][0-9]|3[01])$ ]]
+
+      - name: Check required project files
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for file in README.md CHANGELOG.md LICENSE version.json install.sh; do
+            test -f "$file"
+          done

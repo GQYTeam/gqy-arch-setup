@@ -4,6 +4,7 @@
 [![Hyprland](https://img.shields.io/badge/Hyprland-58E1FF?logo=wayland&logoColor=111111)](https://hyprland.org/)
 [![Shell](https://img.shields.io/badge/Shell-Bash-4EAA25?logo=gnubash&logoColor=white)](https://www.gnu.org/software/bash/)
 [![License](https://img.shields.io/badge/License-AGPL--3.0-orange.svg)](LICENSE)
+[![CI](https://github.com/GQYTeam/gqy-arch-setup/actions/workflows/ci.yml/badge.svg)](https://github.com/GQYTeam/gqy-arch-setup/actions/workflows/ci.yml)
 
 > 一套面向 Arch Linux 的桌面基础配置
 >
@@ -22,7 +23,7 @@
 
 ## 版本
 
-当前版本：`0.1.0`
+当前版本：`v26.09.07`
 
 - [版本号规范](docs/VERSIONING.md)
 - [更新日志](CHANGELOG.md)
