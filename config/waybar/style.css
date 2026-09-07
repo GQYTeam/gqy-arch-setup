@@ -1,0 +1,66 @@
+/* GQYOS Waybar - Catppuccin Mocha */
+
+* {
+    font-family: "JetBrainsMono Nerd Font", "Noto Sans CJK SC", sans-serif;
+    font-size: 13px;
+    min-height: 0;
+}
+
+window#waybar {
+    background: rgba(30, 30, 46, 0.85);
+    border-radius: 10px;
+    color: #cdd6f4;
+}
+
+#workspaces button {
+    padding: 0 5px;
+    color: #6c7086;
+    border-radius: 5px;
+    margin: 2px;
+}
+
+#workspaces button.active {
+    color: #cba6f7;
+    background: rgba(203, 166, 247, 0.15);
+}
+
+#workspaces button:hover {
+    background: rgba(203, 166, 247, 0.1);
+}
+
+#window {
+    padding: 0 10px;
+    color: #a6adc8;
+}
+
+#tray {
+    padding: 0 8px;
+}
+
+#pulseaudio, #network, #battery, #clock {
+    padding: 0 10px;
+}
+
+#pulseaudio {
+    color: #89b4fa;
+}
+
+#network {
+    color: #a6e3a1;
+}
+
+#battery {
+    color: #f9e2af;
+}
+
+#battery.warning {
+    color: #fab387;
+}
+
+#battery.critical {
+    color: #f38ba8;
+}
+
+#clock {
+    color: #cba6f7;
+}
