@@ -1,0 +1,32 @@
+#====================================》
+# 作者：github/yxxbc
+# 邮箱：xynrin@163.com
+# 作用：为脚本提供依赖和包的名称，方便使用包管理器进行下载
+#====================================》
+# 桌面基础环境
+hyprland                         # Wayland 合成器
+xdg-desktop-portal-hyprland     # Hyprland 的桌面门户实现
+xdg-desktop-portal              # 桌面环境集成接口
+xorg-xwayland                   # 在 Wayland 上运行 X11 应用
+pipewire                        # 音视频处理框架
+pipewire-pulse                  # PipeWire 的 PulseAudio 兼容层
+wireplumber                     # PipeWire 会话与策略管理器
+hyprpaper                       # Hyprland 壁纸工具
+wl-clipboard                    # Wayland 剪贴板工具
+kitty                           # 默认的终端
+---
+# 显卡驱动（二选一，不要同时安装 AMD 和 NVIDIA 驱动）
+# AMD（推荐：Mesa 开源驱动，Wayland/Hyprland 体验最佳）
+mesa                            # OpenGL 图形栈
+vulkan-radeon                   # AMD Vulkan 驱动
+lib32-mesa                      # 32 位 OpenGL 支持
+lib32-vulkan-radeon             # 32 位 AMD Vulkan 驱动
+
+# NVIDIA（Turing/RTX 20 系列及更新：优先使用 nvidia-open）
+nvidia-open                     # NVIDIA 开源内核模块
+nvidia-utils                    # NVIDIA 用户态驱动和工具
+lib32-nvidia-utils              # 32 位 NVIDIA 用户态驱动
+egl-wayland                     # NVIDIA/Wayland EGL 支持
+
+# NVIDIA 老款显卡（低于 Turing：将 nvidia-open 替换为 nvidia）
+nvidia                          # NVIDIA 专有内核模块
