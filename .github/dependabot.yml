@@ -1,10 +1,12 @@
 version: 2
 updates:
-  - package-ecosystem: github-actions
-    directory: /
+  # GitHub Actions 依赖
+  - package-ecosystem: "github-actions"
+    directory: "/"
     schedule:
-      interval: monthly
-    open-pull-requests-limit: 5
+      interval: "weekly"
     labels:
-      - dependencies
-      - github-actions
+      - "dependencies"
+      - "automated"
+    commit-message:
+      prefix: "build(deps):"
