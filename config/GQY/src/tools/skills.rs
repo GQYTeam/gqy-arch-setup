@@ -1,0 +1,718 @@
+use super::{ToolRegistry, ToolSpec};
+use crate::config::AppConfig;
+use crate::i18n::agent_text as t;
+use crate::paths::GQYPaths;
+use crate::skills::{self, SkillEntry, SkillScope};
+use anyhow::{bail, Context, Result};
+use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
+
+pub fn register_skills(
+    registry: &mut ToolRegistry,
+    config: &AppConfig,
+    paths: &GQYPaths,
+) -> Result<()> {
+    let (entries, fingerprint) = stable_catalog(config, paths)?;
+    register_load_skill(registry, config.clone(), paths.clone(), &entries);
+    registry.set_skill_catalog_fingerprint(fingerprint);
+    Ok(())
+}
+
+pub fn refresh_skills(
+    registry: &mut ToolRegistry,
+    config: &AppConfig,
+    paths: &GQYPaths,
+) -> Result<bool> {
+    if !registry.contains("load_skill") {
+        return Ok(false);
+    }
+    let Some(snapshot) =
+        prepare_skill_refresh(registry.skill_catalog_fingerprint(), config, paths)?
+    else {
+        return Ok(false);
+    };
+    apply_skill_refresh(registry, config, paths, snapshot);
+    Ok(true)
+}
+
+pub(crate) struct SkillCatalogSnapshot {
+    entries: Vec<SkillEntry>,
+    fingerprint: [u8; 32],
+}
+
+pub(crate) fn prepare_skill_refresh(
+    current: Option<[u8; 32]>,
+    config: &AppConfig,
+    paths: &GQYPaths,
+) -> Result<Option<SkillCatalogSnapshot>> {
+    let fingerprint = skills::catalog_fingerprint(config, paths)?;
+    if current == Some(fingerprint) {
+        return Ok(None);
+    }
+    let (entries, fingerprint) = stable_catalog(config, paths)?;
+    Ok(Some(SkillCatalogSnapshot {
+        entries,
+        fingerprint,
+    }))
+}
+
+pub(crate) fn apply_skill_refresh(
+    registry: &mut ToolRegistry,
+    config: &AppConfig,
+    paths: &GQYPaths,
+    snapshot: SkillCatalogSnapshot,
+) {
+    register_load_skill(registry, config.clone(), paths.clone(), &snapshot.entries);
+    registry.set_skill_catalog_fingerprint(snapshot.fingerprint);
+}
+
+fn stable_catalog(config: &AppConfig, paths: &GQYPaths) -> Result<(Vec<SkillEntry>, [u8; 32])> {
+    for _ in 0..3 {
+        let before = skills::catalog_fingerprint(config, paths)?;
+        let entries = skills::discover(config, paths)?;
+        let after = skills::catalog_fingerprint(config, paths)?;
+        if before == after {
+            return Ok((entries, after));
+        }
+    }
+    anyhow::bail!("skill catalog kept changing while it was being refreshed")
+}
+
+pub fn register_authoring(registry: &mut ToolRegistry, config: AppConfig, paths: GQYPaths) {
+    register_create_skill(registry, config.clone(), paths.clone());
+    register_update_skill(registry, config.clone(), paths.clone());
+    register_delete_skill(registry, config, paths.clone());
+    register_review_skill(registry, paths.clone());
+    register_publish_skill(registry, paths.clone());
+    register_list_skill_drafts(registry, paths);
+}
+
+fn register_load_skill(
+    registry: &mut ToolRegistry,
+    config: AppConfig,
+    paths: GQYPaths,
+    entries: &[SkillEntry],
+) {
+    let description = format!(
+        "{}\n\n{}\n\n{}",
+        t(
+            "Load a specialized skill's full instructions and resources into the conversation. The skill name must match one of the available skills listed below.",
+            "加载指定技能的完整指令和资源到当前对话。技能名称必须匹配下方列出的可用技能之一。",
+        ),
+        t(
+            "Use this tool before applying a skill or using any scripts/resources from that skill. Skill allowed-tools metadata never grants GQY permissions.",
+            "应用 skill 或使用其中的脚本/资源前，必须先加载该 skill。Skill 的 allowed-tools 元数据不会授予 GQY 权限。",
+        ),
+        available_skills_xml(entries),
+    );
+    registry.register(ToolSpec::new(
+        "load_skill",
+        description,
+        json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": t("The exact skill name from the available skills list.", "可用技能列表中的准确名称。")
+                }
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        }),
+        move |args| {
+            let config = config.clone();
+            let paths = paths.clone();
+            async move {
+                tokio::task::spawn_blocking(move || load_skill(args, &config, &paths))
+                    .await
+                    .context("skill loader worker stopped")?
+            }
+        },
+    ));
+}
+
+fn register_create_skill(registry: &mut ToolRegistry, config: AppConfig, paths: GQYPaths) {
+    registry.register(
+        ToolSpec::new(
+            "create_skill",
+            t(
+                "Create a hidden draft for a new GQY skill. Use the returned absolute skill_dir and skill_file with apply_patch, then call publish_skill. This never overwrites an existing skill.",
+                "为新的 GQY skill 创建隐藏草稿。使用返回的绝对 skill_dir 和 skill_file 配合 apply_patch 编辑，随后调用 publish_skill。此操作不会覆盖已有 skill。",
+            ),
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+                        "description": t("Skill name, which must follow the Agent Skills naming rules.", "Skill 名称，必须符合 Agent Skills 命名规则。")
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": t("What the skill does and when it should be used.", "Skill 做什么以及何时应使用。")
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["global", "persona"],
+                        "default": "global",
+                        "description": t("global is available to every persona; persona belongs to the current persona.", "global 对所有人格可用；persona 仅属于当前人格。")
+                    }
+                },
+                "required": ["name", "description"],
+                "additionalProperties": false
+            }),
+            move |args| {
+                let config = config.clone();
+                let paths = paths.clone();
+                async move {
+                    tokio::task::spawn_blocking(move || create_skill(args, &config, &paths))
+                        .await
+                        .context("skill draft worker stopped")?
+                }
+            },
+        )
+        .writes(),
+    );
+}
+
+fn register_update_skill(registry: &mut ToolRegistry, config: AppConfig, paths: GQYPaths) {
+    registry.register(
+        ToolSpec::new(
+            "update_skill",
+            t(
+                "Create an isolated update draft copied from an existing skill. Edit only the returned draft, then call publish_skill. Publishing fails if the live skill changed meanwhile.",
+                "从已有 skill 复制一个隔离的更新草稿。只编辑返回的草稿，然后调用 publish_skill；若 live skill 同期发生变化，发布会失败。",
+            ),
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": t("Existing skill name.", "已有 skill 名称。") },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["global", "persona"],
+                        "description": t("Exact scope containing the skill.", "包含该 skill 的准确作用域。")
+                    }
+                },
+                "required": ["name", "scope"],
+                "additionalProperties": false
+            }),
+            move |args| {
+                let config = config.clone();
+                let paths = paths.clone();
+                async move {
+                    tokio::task::spawn_blocking(move || update_skill(args, &config, &paths))
+                        .await
+                        .context("skill update worker stopped")?
+                }
+            },
+        )
+        .writes(),
+    );
+}
+
+fn register_delete_skill(registry: &mut ToolRegistry, config: AppConfig, paths: GQYPaths) {
+    registry.register(
+        ToolSpec::new(
+            "delete_skill",
+            t(
+                "Permanently delete an existing user skill from the exact global or current-persona scope.",
+                "从准确的 global 或当前 persona 作用域永久删除已有用户 Skill。",
+            ),
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": t("Existing skill name.", "已有 Skill 名称。") },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["global", "persona"],
+                        "description": t("Exact scope containing the skill.", "包含该 Skill 的准确作用域。")
+                    }
+                },
+                "required": ["name", "scope"],
+                "additionalProperties": false
+            }),
+            move |args| {
+                let config = config.clone();
+                let paths = paths.clone();
+                async move {
+                    tokio::task::spawn_blocking(move || delete_skill(args, &config, &paths))
+                        .await
+                        .context("skill deletion worker stopped")?
+                }
+            },
+        )
+        .writes(),
+    );
+}
+
+/// 审查一个 skill 草稿：把草稿内容与 SKILL.md 提供给模型做安全审查，
+/// 并记录审查结论（allow/caution/block）。发布前必须存在有效审查。
+fn register_review_skill(registry: &mut ToolRegistry, paths: GQYPaths) {
+    registry.register(
+        ToolSpec::new(
+            "review_skill",
+            t(
+                "Prepare a security review of a skill draft or installed skill: returns the SKILL.md and all resources for the model to audit, and records the review verdict. publish_skill only succeeds after a non-block review exists. After review, stop and ask the user whether to publish; do not call publish_skill in the same turn.",
+                "准备对 skill 草稿或已安装 skill 的安全审查：返回 SKILL.md 与全部资源供模型审计，并记录审查结论。只有存在非 block 的审查后 publish_skill 才会成功。审查后请停下并询问用户是否发布；不要在同一轮调用 publish_skill。",
+            ),
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": t("Skill name.", "Skill 名称。") },
+                    "draft_id": { "type": "string", "description": t("Optional draft id to review before publishing; omit to review an already-installed skill.", "可选：待发布的草稿 id；省略则审查已安装的 skill。") },
+                    "verdict": {
+                        "type": "string",
+                        "enum": ["allow", "caution", "block"],
+                        "description": t("Your security verdict after auditing the content: allow (safe), caution (medium risk), block (dangerous / blocks install).", "审计后的安全结论：allow（安全）、caution（中风险）、block（危险/禁止安装）。")
+                    },
+                    "reason": { "type": "string", "description": t("Concrete findings justifying the verdict.", "支持该结论的具体发现。") }
+                },
+                "required": ["name", "verdict", "reason"],
+                "additionalProperties": false
+            }),
+            move |args| {
+                let paths = paths.clone();
+                async move {
+                    tokio::task::spawn_blocking(move || review_skill(args, &paths))
+                        .await
+                        .context("skill review worker stopped")?
+                }
+            },
+        )
+        .writes(),
+    );
+}
+
+fn register_publish_skill(registry: &mut ToolRegistry, paths: GQYPaths) {
+    registry.register(
+        ToolSpec::new(
+            "publish_skill",
+            t(
+                "Validate and atomically publish a GQY skill draft. Requires a recorded non-block review_skill verdict for the same draft, and the user's explicit confirmation. Create drafts never overwrite; update drafts use revision checks. Scripts remain resources and are not registered as tools.",
+                "校验并原子发布 GQY skill 草稿。要求该草稿已有非 block 的 review_skill 审查结论且用户明确确认。创建草稿绝不覆盖；更新草稿执行版本检查。scripts 仍是资源，不会注册为工具。",
+            ),
+            json!({
+                "type": "object",
+                "properties": {
+                    "draft_id": { "type": "string", "description": t("Draft ID returned by create_skill or update_skill.", "create_skill 或 update_skill 返回的草稿 ID。") },
+                    "user_confirmed": {
+                        "type": "boolean",
+                        "description": t("Set true only when the user explicitly confirmed publishing after seeing the review.", "仅当用户看过审查后明确确认发布时才置 true。")
+                    }
+                },
+                "required": ["draft_id", "user_confirmed"],
+                "additionalProperties": false
+            }),
+            move |args| {
+                let paths = paths.clone();
+                async move {
+                    tokio::task::spawn_blocking(move || publish_skill(args, &paths))
+                        .await
+                        .context("skill publish worker stopped")?
+                }
+            },
+        )
+        .writes(),
+    );
+}
+
+fn register_list_skill_drafts(registry: &mut ToolRegistry, paths: GQYPaths) {
+    registry.register(
+        ToolSpec::new(
+            "list_skill_drafts",
+            t(
+                "List retained GQY skill drafts. Drafts with no changes for 30 days are removed before listing.",
+                "列出保留的 GQY skill 草稿。列出前会清理 30 天未修改的草稿。",
+            ),
+            json!({"type":"object","properties":{},"additionalProperties":false}),
+            move |_| {
+                let paths = paths.clone();
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        Ok(serde_json::to_string_pretty(&json!({
+                            "ok": true,
+                            "drafts": skills::list_drafts(&paths)?,
+                        }))?)
+                    })
+                    .await
+                    .context("skill draft listing worker stopped")?
+                }
+            },
+        )
+        .writes(),
+    );
+}
+
+fn load_skill(args: Value, config: &AppConfig, paths: &GQYPaths) -> Result<String> {
+    let name = required_string(&args, "name")?;
+    let loaded = skills::load(&name, config, paths)?;
+    let base_dir = loaded
+        .base_dir
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "built-in".to_string());
+    let files = if loaded.files.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n<skill_files>\n{}\n</skill_files>",
+            loaded
+                .files
+                .iter()
+                .map(|path| format!("  <file>{}</file>", xml_escape(&path.display().to_string())))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
+    let metadata = skill_metadata_xml(&loaded.metadata);
+    Ok(format!(
+        "<skill_content name=\"{}\" source=\"{}\">\n{}\n<skill_instructions format=\"markdown\">\n{}\n</skill_instructions>\n\n<skill_base_dir>{}</skill_base_dir>{}\n</skill_content>",
+        xml_escape(&loaded.metadata.name),
+        loaded.source.as_str(),
+        metadata,
+        xml_escape(&loaded.body),
+        xml_escape(&base_dir),
+        files,
+    ))
+}
+
+fn skill_metadata_xml(metadata: &crate::skills::SkillMetadata) -> String {
+    let mut fields = vec![format!(
+        "  <description>{}</description>",
+        xml_escape(&metadata.description)
+    )];
+    if let Some(license) = &metadata.license {
+        fields.push(format!("  <license>{}</license>", xml_escape(license)));
+    }
+    if let Some(compatibility) = &metadata.compatibility {
+        fields.push(format!(
+            "  <compatibility>{}</compatibility>",
+            xml_escape(compatibility)
+        ));
+    }
+    if let Some(allowed_tools) = &metadata.allowed_tools {
+        fields.push(format!(
+            "  <allowed_tools grants_permissions=\"false\">{}</allowed_tools>",
+            xml_escape(allowed_tools)
+        ));
+    }
+    for (key, value) in &metadata.metadata {
+        fields.push(format!(
+            "  <entry key=\"{}\">{}</entry>",
+            xml_escape(key),
+            xml_escape(value)
+        ));
+    }
+    format!("<skill_metadata>\n{}\n</skill_metadata>", fields.join("\n"))
+}
+
+fn create_skill(args: Value, config: &AppConfig, paths: &GQYPaths) -> Result<String> {
+    let name = required_string(&args, "name")?;
+    let description = required_string(&args, "description")?;
+    let scope = SkillScope::parse(args.get("scope").and_then(Value::as_str))?;
+    let draft = skills::create_draft(config, paths, &name, &description, scope)?;
+    Ok(serde_json::to_string_pretty(&json!({
+        "ok": true,
+        "state": "draft",
+        "draft": draft,
+        "next": "Edit only the returned draft with apply_patch, then call publish_skill with draft_id."
+    }))?)
+}
+
+fn update_skill(args: Value, config: &AppConfig, paths: &GQYPaths) -> Result<String> {
+    let name = required_string(&args, "name")?;
+    let scope_value = required_string(&args, "scope")?;
+    let scope = SkillScope::parse(Some(&scope_value))?;
+    let draft = skills::update_draft(config, paths, &name, scope)?;
+    Ok(serde_json::to_string_pretty(&json!({
+        "ok": true,
+        "state": "draft",
+        "draft": draft,
+        "next": "Edit only the returned draft with apply_patch, then call publish_skill with draft_id."
+    }))?)
+}
+
+fn publish_skill(args: Value, paths: &GQYPaths) -> Result<String> {
+    let draft_id = required_string(&args, "draft_id")?;
+    if args.get("user_confirmed").and_then(Value::as_bool) != Some(true) {
+        bail!("publish_skill requires explicit user confirmation after review_skill");
+    }
+    let draft = skills::find_draft(paths, &draft_id)?;
+    let sha = skills::sha256_of_resource(Path::new(&draft.skill_dir))?;
+    let allowed = skills::confirm_install(paths, "skill", &draft.name, &sha)?;
+    if !allowed {
+        bail!("skill review did not allow publishing: {}", draft.name);
+    }
+    let published = skills::publish_draft(paths, &draft_id)?;
+    skills::record_install(paths, "skill", &published.name, &published.path, &sha)?;
+    Ok(serde_json::to_string_pretty(&json!({
+        "ok": true,
+        "state": "published",
+        "skill": published,
+        "catalog_refresh": "next tool round",
+    }))?)
+}
+
+/// 审查 skill 草稿（或已安装 skill），把内容交给模型审计并记录结论。
+fn review_skill(args: Value, paths: &GQYPaths) -> Result<String> {
+    let name = required_string(&args, "name")?;
+    let verdict = required_string(&args, "verdict")?;
+    if !matches!(verdict.as_str(), "allow" | "caution" | "block") {
+        bail!("invalid verdict: {verdict}; expected allow, caution or block");
+    }
+    let reason = required_string(&args, "reason")?;
+    let draft_id = args.get("draft_id").and_then(Value::as_str);
+
+    let (base_dir, body, files) = if let Some(draft_id) = draft_id.filter(|id| !id.is_empty()) {
+        let draft = skills::find_draft(paths, draft_id)?;
+        let dir = PathBuf::from(&draft.skill_dir);
+        let raw = std::fs::read_to_string(dir.join("SKILL.md"))?;
+        let (_, body) = crate::skills::parse_skill_document(&raw, Some(&draft.name))?;
+        let mut file_list = Vec::new();
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let file_name = entry.file_name();
+            if file_name == "SKILL.md" || file_name.to_string_lossy().starts_with('.') {
+                continue;
+            }
+            if entry.file_type()?.is_file() {
+                file_list.push(entry.path());
+            }
+        }
+        file_list.sort();
+        (draft.skill_dir, body, file_list)
+    } else {
+        let config = AppConfig::load_or_default(paths)?;
+        let loaded = skills::load(&name, &config, paths)?;
+        let base_dir = loaded
+            .base_dir
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "built-in".to_string());
+        (base_dir, loaded.body.clone(), loaded.files.clone())
+    };
+    let sha = skills::sha256_of_resource(Path::new(&base_dir))?;
+    skills::record_review(paths, "skill", &name, &base_dir, &sha, &verdict, &reason)?;
+    let files = if files.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n<skill_files>\n{}\n</skill_files>",
+            files
+                .iter()
+                .map(|path| format!("  <file>{}</file>", xml_escape(&path.display().to_string())))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
+    Ok(serde_json::to_string_pretty(&json!({
+        "ok": true,
+        "state": "reviewed",
+        "skill": name,
+        "sha256": sha,
+        "verdict": verdict,
+        "base_dir": base_dir,
+        "skill_md": body,
+        "files": files,
+        "output_instruction": "Summarize the verdict and concrete findings. If verdict is allow/caution, ask the user whether to publish and stop; publish_skill may only run in a later turn after the user confirms.",
+    }))?)
+}
+
+fn delete_skill(args: Value, config: &AppConfig, paths: &GQYPaths) -> Result<String> {
+    let name = required_string(&args, "name")?;
+    let scope_value = required_string(&args, "scope")?;
+    let scope = SkillScope::parse(Some(&scope_value))?;
+    let deleted = skills::delete_skill(config, paths, &name, scope)?;
+    Ok(serde_json::to_string_pretty(&json!({
+        "ok": true,
+        "state": "deleted",
+        "skill": deleted,
+        "catalog_refresh": "next tool round",
+    }))?)
+}
+
+fn required_string(args: &Value, key: &str) -> Result<String> {
+    let value = args
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if value.is_empty() {
+        anyhow::bail!("{key} is required");
+    }
+    Ok(value.to_string())
+}
+
+fn available_skills_xml(entries: &[SkillEntry]) -> String {
+    let items = entries
+        .iter()
+        .map(|entry| {
+            format!(
+                "  <skill>\n    <name>{}</name>\n    <description>{}</description>\n    <source>{}</source>\n  </skill>",
+                xml_escape(&entry.metadata.name),
+                xml_escape(&entry.metadata.description),
+                entry.source.as_str(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("<available_skills>\n{items}\n</available_skills>")
+}
+
+fn xml_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn test_paths(root: &std::path::Path) -> GQYPaths {
+        GQYPaths {
+            root_dir: root.to_path_buf(),
+            config_dir: root.join("config"),
+            config_file: root.join("config/config.jsonc"),
+            skills_dir: root.join("data/skills"),
+            data_dir: root.join("data"),
+            cache_dir: root.join("cache"),
+            state_dir: root.join("state"),
+            pictures_dir: root.join("data/pictures"),
+            fish_hook_file: root.join("fish/gqy.fish"),
+            bash_hook_file: root.join("config/shell/bash-hook.sh"),
+            zsh_hook_file: root.join("config/shell/zsh-hook.zsh"),
+            scripts_dir: root.join("data/scripts"),
+            system_scripts_dir: PathBuf::new(),
+        }
+    }
+
+    #[test]
+    fn load_skill_description_includes_builtin_creator() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = test_paths(temp.path());
+        let config = AppConfig::default();
+        let mut registry = ToolRegistry::new();
+        register_skills(&mut registry, &config, &paths).unwrap();
+        let description = &registry.get("load_skill").unwrap().description;
+        assert!(description.contains("<name>skill-creator</name>"));
+        assert!(description.contains("<source>built_in</source>"));
+    }
+
+    #[test]
+    fn loaded_skill_exposes_standard_metadata_without_granting_permissions() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = test_paths(temp.path());
+        let directory = paths.skills_dir.join("sample-skill");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("SKILL.md"),
+            "---\nname: sample-skill\ndescription: Sample workflow\nlicense: MIT\ncompatibility: GQY\nallowed-tools: run_command\nmetadata:\n  author: test\n---\n\nBody.",
+        )
+        .unwrap();
+
+        let loaded = load_skill(
+            json!({"name": "sample-skill"}),
+            &AppConfig::default(),
+            &paths,
+        )
+        .unwrap();
+        assert!(loaded.contains("<license>MIT</license>"));
+        assert!(loaded.contains("<compatibility>GQY</compatibility>"));
+        assert!(loaded
+            .contains("<allowed_tools grants_permissions=\"false\">run_command</allowed_tools>"));
+        assert!(loaded.contains("<entry key=\"author\">test</entry>"));
+    }
+
+    #[test]
+    fn authoring_tools_have_write_permissions() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = test_paths(temp.path());
+        let mut registry = ToolRegistry::new();
+        register_authoring(&mut registry, AppConfig::default(), paths);
+        for name in [
+            "create_skill",
+            "update_skill",
+            "delete_skill",
+            "publish_skill",
+        ] {
+            assert_eq!(
+                registry.permission(name).unwrap(),
+                super::super::ToolPermission::Writes
+            );
+        }
+        assert_eq!(
+            registry.permission("list_skill_drafts").unwrap(),
+            super::super::ToolPermission::Writes
+        );
+    }
+
+    #[test]
+    fn refresh_detects_new_skill_once_without_a_watcher() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = test_paths(temp.path());
+        let config = AppConfig::default();
+        let mut registry = ToolRegistry::new();
+        register_skills(&mut registry, &config, &paths).unwrap();
+        let directory = paths.skills_dir.join("new-skill");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("SKILL.md"),
+            "---\nname: new-skill\ndescription: Newly added skill\n---\n",
+        )
+        .unwrap();
+
+        assert!(refresh_skills(&mut registry, &config, &paths).unwrap());
+        assert!(registry
+            .get("load_skill")
+            .unwrap()
+            .description
+            .contains("<name>new-skill</name>"));
+        assert!(!refresh_skills(&mut registry, &config, &paths).unwrap());
+    }
+
+    #[test]
+    fn dynamic_load_skill_keeps_the_builtin_loading_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = test_paths(temp.path());
+        let config = AppConfig::default();
+        let mut registry = ToolRegistry::new();
+        register_skills(&mut registry, &config, &paths).unwrap();
+        let load_skill = registry.get("load_skill").unwrap();
+        assert!(!load_skill.always_loaded);
+        assert_eq!(
+            load_skill.load_policy,
+            super::super::tool_descriptions::LoadPolicy::Summary
+        );
+        assert_eq!(load_skill.groups, vec!["skills"]);
+    }
+
+    #[test]
+    fn update_skill_requires_an_explicit_scope_at_runtime() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = test_paths(temp.path());
+        let error = update_skill(
+            json!({"name": "sample-skill"}),
+            &AppConfig::default(),
+            &paths,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("scope is required"));
+    }
+
+    #[test]
+    fn delete_skill_requires_an_explicit_scope_at_runtime() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = test_paths(temp.path());
+        let error = delete_skill(
+            json!({"name": "sample-skill"}),
+            &AppConfig::default(),
+            &paths,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("scope is required"));
+    }
+}

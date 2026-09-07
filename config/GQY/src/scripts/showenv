@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# 显示名称：查询环境变量
+# 描述：查看运行中应用/进程的环境变量。(macOS)
+# description: Show environment variables for a running app/process. (macOS)
+# macOS 不再通过 ps 暴露其他进程的环境变量，这里改用 LaunchServices
+# (lsappinfo) 读取 GUI 应用的环境；非 GUI 进程无法读取，会给出明确提示。
+
+set -u
+
+APP_NAME="showenv"
+
+usage() {
+  cat <<'EOF'
+showenv - show environment variables of a running app (macOS)
+
+Usage:
+  showenv <app-name|pid>
+  showenv --pid <pid>
+  echo '{"app":"qq"}' | showenv
+  echo '{"pid":12345}' | showenv
+
+Examples:
+  showenv safari
+  showenv QQ
+  showenv --pid 12345
+
+macOS only exposes the environment of LaunchServices-managed GUI apps that are
+currently running (read via lsappinfo). Command-line/daemon processes have no
+readable environment here.
+EOF
+}
+
+err() { printf 'error: %s\n' "$*" >&2; }
+die() { err "$*"; exit 1; }
+
+is_pid() {
+  [[ "${1:-}" =~ ^[0-9]+$ ]]
+}
+
+json_string_value() {
+  local input="$1" key="$2" pattern
+  pattern="\"$key\"[[:space:]]*:[[:space:]]*\"([^\"]*)\""
+  [[ "$input" =~ $pattern ]] && printf '%s' "${BASH_REMATCH[1]}"
+}
+
+json_number_value() {
+  local input="$1" key="$2" pattern
+  pattern="\"$key\"[[:space:]]*:[[:space:]]*([0-9]+)"
+  [[ "$input" =~ $pattern ]] && printf '%s' "${BASH_REMATCH[1]}"
+}
+
+json_first_arg() {
+  local input="$1" pattern
+  pattern='"args"[[:space:]]*:[[:space:]]*\[[[:space:]]*"([^"]*)"'
+  [[ "$input" =~ $pattern ]] && printf '%s' "${BASH_REMATCH[1]}"
+}
+
+target_from_input() {
+  local input="$1" value key
+  input="$(trim "$input")"
+  [[ -n "$input" ]] || return 1
+
+  value="$(json_number_value "$input" pid)"
+  [[ -n "$value" ]] && { printf '%s' "$value"; return 0; }
+
+  for key in app app_name appName application name software program process process_name processName query target command; do
+    value="$(json_string_value "$input" "$key")"
+    [[ -n "$value" ]] && { printf '%s' "$value"; return 0; }
+  done
+
+  value="$(json_first_arg "$input")"
+  [[ -n "$value" ]] && { printf '%s' "$value"; return 0; }
+
+  if [[ "$input" != *'{'* && "$input" != *'['* && "$input" != *':'* ]]; then
+    printf '%s' "$input"
+    return 0
+  fi
+
+  return 1
+}
+
+lower() {
+  printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'
+}
+
+trim() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+strip_quotes() {
+  local value="$1"
+  if [[ "$value" == '"'*'"' && ${#value} -ge 2 ]]; then
+    value="${value:1:${#value}-2}"
+  elif [[ "$value" == "'"*"'" && ${#value} -ge 2 ]]; then
+    value="${value:1:${#value}-2}"
+  fi
+  printf '%s' "$value"
+}
+
+same_token() {
+  [[ "$(lower "$1")" == "$(lower "$2")" ]]
+}
+
+ps_command() {
+  ps -ww -p "$1" -o command= 2>/dev/null || true
+}
+
+asn_by_pid() {
+  local pid="$1"
+  lsappinfo find pid="$pid" 2>/dev/null | head -n 1
+}
+
+asn_by_name() {
+  local q="$1" out
+  for pred in "name=$q" "kLSDisplayNameKey=$q" "kLSBundleIdentifierKey=$q"; do
+    out="$(lsappinfo find "$pred" 2>/dev/null | head -n 1)"
+    [[ -n "$out" ]] && { printf '%s' "$out"; return 0; }
+  done
+  # 大小写不敏感回退：在 lsappinfo list 里按显示名/包名匹配
+  out="$(lsappinfo list 2>/dev/null | grep -iE "^\s*[0-9]+\) \"[^\"]*${q}[^\"]*\"" | head -n 1 \
+    | sed -E 's/.*(ASN:0x[0-9a-fA-F]+-[0-9a-fA-Fx]+).*/\1/')"
+  [[ -n "$out" ]] && printf '%s' "$out"
+}
+
+select_pid_by_name() {
+  local query="$1" pid comm args argv0
+  while read -r pid comm args; do
+    [[ -n "$pid" && "$pid" != "$$" && "$pid" != "$PPID" ]] || continue
+    [[ "$args" == *"$APP_NAME"* ]] && continue
+    same_token "$comm" "$query" && { printf '%s' "$pid"; return 0; }
+    argv0="${args%%[[:space:]]*}"
+    same_token "${argv0##*/}" "$query" && { printf '%s' "$pid"; return 0; }
+  done < <(ps -Aww -o pid=,comm=,args=)
+
+  while read -r pid comm args; do
+    [[ -n "$pid" && "$pid" != "$$" && "$pid" != "$PPID" ]] || continue
+    [[ "$args" == *"$APP_NAME"* ]] && continue
+    contains_token "$comm" "$query" && { printf '%s' "$pid"; return 0; }
+    contains_token "$args" "$query" && { printf '%s' "$pid"; return 0; }
+  done < <(ps -Aww -o pid=,comm=,args=)
+
+  return 1
+}
+
+print_env_from_asn() {
+  local asn="$1" env key value line
+  env="$(lsappinfo info -only Environment "$asn" 2>/dev/null || true)"
+  [[ -n "$env" ]] || die "无法读取该应用的环境变量"
+  if [[ "$env" == *"NULL"* ]]; then
+    die "该应用没有可读取的环境变量（macOS 安全限制）"
+  fi
+
+  printf '\nEnvironment:\n'
+  while IFS= read -r line; do
+    line="$(trim "$line")"
+    [[ "$line" == *"="* ]] || continue
+    key="${line%%=*}"
+    key="$(strip_quotes "$(trim "$key")")"
+    value="${line#*=}"
+    value="$(strip_quotes "$(trim "$value")")"
+    value="${value%%;*}"
+    value="$(trim "$value")"
+    [[ -n "$key" ]] || continue
+    # 跳过 plist 字典的 { } 结构行，只保留 KEY = 标量 的条目
+    [[ "$value" == "{" || "$value" == "}" ]] && continue
+    printf '%s=%s\n' "$key" "$value"
+  done <<< "$env" | sort
+}
+
+contains_token() {
+  [[ "$(lower "$1")" == *"$(lower "$2")"* ]]
+}
+
+main() {
+  local target pid asn cmd app_pid
+
+  if [[ $# -eq 0 && ! -t 0 ]]; then
+    target="$(target_from_input "$(cat)" 2>/dev/null || true)"
+    [[ -n "$target" ]] && set -- "$target"
+  fi
+
+  case "${1:-}" in
+    -h|--help|'')
+      usage
+      [[ "${1:-}" == "" ]] && exit 1 || exit 0
+      ;;
+    --pid)
+      pid="${2:-}"
+      is_pid "$pid" || die "--pid requires a numeric PID"
+      ;;
+  esac
+
+  if [[ -z "${pid:-}" ]]; then
+    target="${1:-}"
+    if is_pid "$target"; then
+      pid="$target"
+    else
+      asn="$(asn_by_name "$target")"
+      if [[ -n "$asn" ]]; then
+        app_pid="$(lsappinfo info -only pid "$asn" 2>/dev/null | sed -E 's/[^0-9]//g')"
+        cmd="$(ps_command "$app_pid")"
+        printf 'App: %s\n' "$target"
+        [[ -n "$app_pid" ]] && printf 'PID: %s\n' "$app_pid"
+        [[ -n "$cmd" ]] && printf 'Command: %s\n' "$cmd"
+        print_env_from_asn "$asn"
+        exit 0
+      fi
+      pid="$(select_pid_by_name "$target" 2>/dev/null || true)"
+      [[ -n "$pid" ]] || die "no running process found for '$target'"
+    fi
+  fi
+
+  cmd="$(ps_command "$pid")"
+  printf 'PID: %s\n' "$pid"
+  [[ -n "$cmd" ]] && printf 'Command: %s\n' "$cmd"
+
+  asn="$(asn_by_pid "$pid")"
+  [[ -n "$asn" ]] || die "macOS 不公开该进程的环境变量（仅 LaunchServices 管理的 GUI 应用可读，且需正在运行）"
+  print_env_from_asn "$asn"
+}
+
+main "$@"

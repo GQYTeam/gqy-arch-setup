@@ -1,0 +1,40 @@
+{
+  "name": "query_wiki",
+  "display_name": "查询游戏百科",
+  "description": "通用游戏 wiki 实时查询：按 site 参数选择游戏站点，返回角色/武器/物品/攻略等页面的实时数据（技能数值、配装、版本信息）。被问到游戏数据、角色强度、技能、配队等时使用。",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "角色/武器/物品名称，支持中文或英文（如 Rover、Jinhsi、今汐、忌炎）。"
+      },
+      "site": {
+        "type": "string",
+        "enum": [
+          "",
+          "wuwa"
+        ],
+        "description": "要查询的 wiki 站点。留空则自动选择。"
+      },
+      "mode": {
+        "type": "string",
+        "enum": [
+          "auto",
+          "page",
+          "search"
+        ]
+      }
+    },
+    "required": [
+      "query"
+    ]
+  },
+  "permission": "readonly",
+  "always_loaded": false,
+  "load_policy": "group",
+  "groups": [
+    "gaming",
+    "acg"
+  ]
+}
