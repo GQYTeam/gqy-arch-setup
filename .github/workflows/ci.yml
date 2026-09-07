@@ -23,6 +23,10 @@ jobs:
           set -Eeuo pipefail
           bash -n install.sh
           bash -n srcipts/CreateYay.sh
+          # Validate config files exist
+          for f in config/hypr/hyprland.conf config/hypr/keybindings.conf config/hypr/windowrules.conf config/hypr/autostart.conf config/hypr/theme.conf config/hypr/monitors.conf config/waybar/config.jsonc config/waybar/style.css config/kitty/kitty.conf config/fuzzel/fuzzel.ini config/mako/config config/hyprlock/hyprlock.conf config/hypridle/hypridle.conf config/hyprpaper/hyprpaper.conf config/shell/zshrc config/shell/zshenv config/tmux/tmux.conf config/nvim/init.vim config/yazi/yazi.toml config/git/gitconfig config/GQY/Cargo.toml; do
+            test -f "$f"
+          done
 
       - name: Validate version metadata
         shell: bash
