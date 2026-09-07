@@ -1,0 +1,51 @@
+# GQYOS Git Global Configuration
+
+[user]
+  name = GQYOS
+  email = gqyos@localhost
+
+[init]
+  defaultBranch = main
+
+[pull]
+  rebase = true
+
+[push]
+  autoSetupRemote = true
+
+[core]
+  editor = nvim
+  pager = delta
+  autocrlf = input
+
+[delta]
+  navigate = true
+  side-by-side = true
+  line-numbers = true
+  syntax-theme = "Catppuccin Mocha"
+
+[interactive]
+  diffFilter = delta --color-only
+
+[merge]
+  conflictstyle = zdiff3
+
+[diff]
+  colorMoved = default
+
+[rerere]
+  enabled = true
+
+[alias]
+  s = status -sb
+  a = add
+  c = commit
+  p = push
+  l = log --oneline --graph --decorate -20
+  d = diff
+  b = branch
+  co = checkout
+  cb = checkout -b
+  last = log -1 HEAD
+  unstage = reset HEAD --
+  amend = commit --amend --no-edit
