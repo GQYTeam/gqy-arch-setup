@@ -39,6 +39,4 @@ fi
 
 
 
-# ========= 克隆当前仓库到 tmp ========= #
-git clone https://github.com/GQYTeam/gqy-arch-setup /tmp
-cd tmp
+
